@@ -1,157 +1,132 @@
-import streamlit as st
+import tkinter as tk
+from tkinter import ttk, messagebox
 import pandas as pd
-from datetime import datetime, timedelta
-import gspread
-from google.oauth2.service_account import Credentials
+from datetime import datetime
 import os
-import pytz
-import time
 
-# --- CONFIGURATION ---
-ADMIN_PIN = "1234" 
-SHEET_NAME = "DTR_Database"
-TIMEZONE = pytz.timezone('Asia/Manila')
+class DTRApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Malapascua - Daily Time Record")
+        self.root.geometry("800x600")
 
-# --- DATA HELPERS ---
-@st.cache_data(ttl=60)
-def load_crew():
-    if not os.path.exists("Crew details.xlsx"):
-        return None
-    df = pd.read_excel("Crew details.xlsx", skiprows=1)
-    df.columns = ['Name', 'Job', 'Hired', 'Pay_OT', 'Pay_Night', 'Rate']
-    return df
+        self.file_path = "dtr_log.csv"
+        self.load_data()
 
-def get_spreadsheet():
-    try:
-        scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
-        client = gspread.authorize(creds)
-        return client.open(SHEET_NAME)
-    except Exception as e:
-        st.error(f"Spreadsheet Access Error: {e}")
-        return None
+        # Custom Header
+        header = tk.Label(root, text="Malapascua - Daily Time Record", font=("Arial", 20, "bold"), pady=20)
+        header.pack()
 
-# --- AUTOMATIC SYNC ENGINE ---
-def run_auto_sync(ss, crew_df):
-    """Calculates payroll and updates the Summary sheet automatically."""
-    try:
-        main_sheet = ss.get_worksheet(0)
-        raw_logs = pd.DataFrame(main_sheet.get_all_records())
-        if raw_logs.empty:
+        self.tabs = ttk.Notebook(root)
+        self.check_in_tab = ttk.Frame(self.tabs)
+        self.admin_tab = ttk.Frame(self.tabs)
+        
+        self.tabs.add(self.check_in_tab, text="Attendance")
+        self.tabs.add(self.admin_tab, text="Admin (Edit Records)")
+        self.tabs.pack(expand=1, fill="both")
+
+        self.setup_attendance_tab()
+        self.setup_admin_tab()
+
+    def load_data(self):
+        if os.path.exists(self.file_path):
+            self.df = pd.read_csv(self.file_path)
+        else:
+            self.df = pd.DataFrame(columns=["Name", "Date", "Time In", "Time Out", "Status"])
+
+    def setup_attendance_tab(self):
+        # Staff list (Add your actual staff names here)
+        self.staff_names = ["Juan Dela Cruz", "Maria Santos", "Ricardo Dalisay"] 
+        
+        tk.Label(self.check_in_tab, text="Select Name:", font=("Arial", 12)).pack(pady=10)
+        self.name_var = tk.StringVar()
+        self.name_menu = ttk.Combobox(self.check_in_tab, textvariable=self.name_var, values=self.staff_names, state="readonly", font=("Arial", 12))
+        self.name_menu.pack(pady=5)
+
+        btn_frame = tk.Frame(self.check_in_tab)
+        btn_frame.pack(pady=20)
+
+        tk.Button(btn_frame, text="TIME IN", bg="green", fg="white", width=15, height=2, command=self.time_in).grid(row=0, column=0, padx=10)
+        tk.Button(btn_frame, text="TIME OUT", bg="red", fg="white", width=15, height=2, command=self.time_out).grid(row=0, column=1, padx=10)
+
+    def setup_admin_tab(self):
+        # Admin table to view and edit records
+        self.tree = ttk.Treeview(self.admin_tab, columns=("Name", "Date", "Time In", "Time Out"), show='headings')
+        self.tree.heading("Name", text="Name")
+        self.tree.heading("Date", text="Date")
+        self.tree.heading("Time In", text="Time In")
+        self.tree.heading("Time Out", text="Time Out")
+        self.tree.pack(expand=1, fill="both", padx=10, pady=10)
+
+        edit_btn_frame = tk.Frame(self.admin_tab)
+        edit_btn_frame.pack(pady=10)
+
+        tk.Button(edit_btn_frame, text="Delete Selected Record", command=self.delete_record, bg="#ff9999").pack(side="left", padx=10)
+        tk.Button(edit_btn_frame, text="Refresh List", command=self.refresh_admin_list).pack(side="left", padx=10)
+        
+        self.refresh_admin_list()
+
+    def time_in(self):
+        name = self.name_var.get()
+        if not name:
+            messagebox.showwarning("Error", "Please select a name.")
             return
 
-        # Calculate payroll for the current month to keep the summary fresh
-        report = calculate_payroll(raw_logs, crew_df)
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+
+        # Check if already timed in
+        if not self.df[(self.df['Name'] == name) & (self.df['Status'] == 'Active')].empty:
+            messagebox.showwarning("Error", f"{name} is already timed in.")
+            return
+
+        new_row = {"Name": name, "Date": date_str, "Time In": time_str, "Time Out": "", "Status": "Active"}
+        self.df = pd.concat([self.df, pd.DataFrame([new_row])], ignore_index=True)
+        self.save_and_refresh()
+        messagebox.showinfo("Success", f"{name} timed in at {time_str}")
+
+    def time_out(self):
+        name = self.name_var.get()
+        if not name:
+            messagebox.showwarning("Error", "Please select a name.")
+            return
+
+        now = datetime.now()
+        time_str = now.strftime("%H:%M:%S")
+
+        idx = self.df.index[(self.df['Name'] == name) & (self.df['Status'] == 'Active')]
+        if not idx.empty:
+            self.df.at[idx[0], 'Time Out'] = time_str
+            self.df.at[idx[0], 'Status'] = 'Completed'
+            self.save_and_refresh()
+            messagebox.showinfo("Success", f"{name} timed out at {time_str}")
+            # Note: name_menu values are NOT filtered, so the name stays in the list for tomorrow/next shift.
+        else:
+            messagebox.showwarning("Error", f"No active 'Time In' record found for {name}.")
+
+    def delete_record(self):
+        selected_item = self.tree.selection()
+        if not selected_item:
+            messagebox.showwarning("Error", "Select a record to delete.")
+            return
         
-        try:
-            sheet_summary = ss.worksheet("Payroll_Summary")
-        except:
-            sheet_summary = ss.add_worksheet(title="Payroll_Summary", rows="100", cols="20")
-        
-        sheet_summary.clear()
-        data_to_push = [report.columns.tolist()] + report.astype(str).values.tolist()
-        sheet_summary.update(data_to_push)
-    except Exception as e:
-        print(f"Auto-sync background error: {e}")
+        item_vals = self.tree.item(selected_item)['values']
+        # Remove from dataframe based on matching values
+        self.df = self.df[~((self.df['Name'] == item_vals[0]) & (self.df['Time In'] == item_vals[2]))]
+        self.save_and_refresh()
 
-def calculate_payroll(df_logs, df_crew):
-    df_logs['Timestamp'] = pd.to_datetime(df_logs['Timestamp'])
-    df_logs['Date'] = df_logs['Timestamp'].dt.date
-    
-    rates = df_crew.set_index('Name')['Rate'].to_dict()
-    ot_enabled = df_crew.set_index('Name')['Pay_OT'].to_dict()
-    
-    summary = []
-    for (name, date), group in df_logs.groupby(['Name', 'Date']):
-        group = group.sort_values('Timestamp')
-        ins = group[group['Status'] == 'IN']['Timestamp'].tolist()
-        outs = group[group['Status'] == 'OUT']['Timestamp'].tolist()
-        
-        total_hrs = sum((o - i).total_seconds() / 3600 for i, o in zip(ins, outs))
-        h_rate = rates.get(name, 0)
-        actual_pay = total_hrs * h_rate
-        
-        if total_hrs > 8 and ot_enabled.get(name) == "YES":
-            actual_pay += (total_hrs - 8) * h_rate * 0.25
-            
-        summary.append({
-            "Date": str(date), "Name": name, "Worked Hours": round(total_hrs, 2),
-            "Hourly Rate": h_rate, "Final Pay": round(actual_pay, 2),
-            "Net vs 8h": round(actual_pay - (8 * h_rate), 2)
-        })
-    return pd.DataFrame(summary)
+    def save_and_refresh(self):
+        self.df.to_csv(self.file_path, index=False)
+        self.refresh_admin_list()
 
-# --- UI SETUP ---
-st.set_page_config(page_title="Malapascua DTR", layout="centered")
+    def refresh_admin_list(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        for _, row in self.df.iterrows():
+            self.tree.insert("", "end", values=(row["Name"], row["Date"], row["Time In"], row["Time Out"]))
 
-# Initialize states
-if 'submitted' not in st.session_state:
-    st.session_state.submitted = False
-if 'msg' not in st.session_state:
-    st.session_state.msg = ""
-if 'widget_key' not in st.session_state:
-    st.session_state.widget_key = 0
-
-tab1, tab2 = st.tabs(["🕒 Staff Clock-In", "🔐 Admin Dashboard"])
-
-with tab1:
-    placeholder = st.empty()
-    
-    if st.session_state.submitted:
-        with placeholder.container():
-            st.markdown(f"<h1 style='text-align: center; color: #2E7D32;'>{st.session_state.msg}</h1>", unsafe_allow_html=True)
-            time.sleep(5)
-            st.session_state.submitted = False
-            # Incrementing the key forces the selectbox to reset to blank
-            st.session_state.widget_key += 1 
-            st.rerun()
-    else:
-        with placeholder.container():
-            crew_df = load_crew()
-            if crew_df is not None:
-                staff_names = [""] + sorted(crew_df['Name'].tolist())
-                # Key changes every time a submission happens, clearing the selection
-                selected_name = st.selectbox(
-                    "Select your Name", 
-                    staff_names, 
-                    key=f"name_select_{st.session_state.widget_key}"
-                )
-                
-                if selected_name:
-                    now = datetime.now(TIMEZONE)
-                    display_time = now.strftime("%H:%M")
-                    db_ts = now.strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    col1, col2 = st.columns(2)
-                    ss = get_spreadsheet()
-
-                    if col1.button("TIME IN", use_container_width=True, type="primary"):
-                        ss.get_worksheet(0).append_row([selected_name, db_ts, "IN", "Live"])
-                        # RUN AUTO SYNC IMMEDIATELY
-                        run_auto_sync(ss, crew_df)
-                        st.session_state.msg = f"Time IN: {display_time}"
-                        st.session_state.submitted = True
-                        st.rerun()
-
-                    if col2.button("TIME OUT", use_container_width=True):
-                        ss.get_worksheet(0).append_row([selected_name, db_ts, "OUT", "Live"])
-                        # RUN AUTO SYNC IMMEDIATELY
-                        run_auto_sync(ss, crew_df)
-                        st.session_state.msg = f"Time OUT: {display_time}"
-                        st.session_state.submitted = True
-                        st.rerun()
-
-with tab2:
-    if st.text_input("Admin PIN", type="password") == ADMIN_PIN:
-        st.success("Access Granted")
-        d_start = st.date_input("From", datetime.now(TIMEZONE) - timedelta(days=14))
-        d_end = st.date_input("To", datetime.now(TIMEZONE))
-        
-        ss = get_spreadsheet()
-        raw_logs = pd.DataFrame(ss.get_worksheet(0).get_all_records())
-        if not raw_logs.empty:
-            report = calculate_payroll(raw_logs, load_crew())
-            # Filter report by selected dates for viewing
-            report['Date_dt'] = pd.to_datetime(report['Date']).dt.date
-            filtered_report = report[(report['Date_dt'] >= d_start) & (report['Date_dt'] <= d_end)]
-            st.dataframe(filtered_report.drop(columns=['Date_dt']), use_container_width=True)
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = DTRApp(root)
+    root.mainloop()
