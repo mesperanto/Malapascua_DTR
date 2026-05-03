@@ -17,7 +17,6 @@ TIMEZONE = pytz.timezone('Asia/Manila')
 def load_crew():
     if not os.path.exists("Crew details.xlsx"):
         return None
-    # Skip original header row to get to the actual column names/data
     df = pd.read_excel("Crew details.xlsx", skiprows=1)
     df.columns = ['Name', 'Job', 'Hired', 'Pay_OT', 'Pay_Night', 'Rate']
     return df
@@ -29,7 +28,7 @@ def get_spreadsheet():
         client = gspread.authorize(creds)
         return client.open(SHEET_NAME)
     except Exception as e:
-        st.error(f"Spreadsheet Access Error: {e}")
+        st.error(f"Spreadsheet Error: {e}")
         return None
 
 # --- PAYROLL CALCULATOR ENGINE ---
@@ -55,33 +54,56 @@ def calculate_payroll(df_logs, df_crew, start_date=None, end_date=None):
         
         sessions = len(ins)
         threshold = 8 if sessions >= 2 else 9
-        
-        # Calculations (Rates are Hourly)
-        ot_hrs = max(0, total_hrs - threshold) if ot_enabled.get(name) == "YES" else 0
-        under_hrs = max(0, 8 - total_hrs)
-        
         hourly_rate = rates.get(name, 0)
         
-        base_pay = total_hrs * hourly_rate
-        ot_pay = ot_hrs * (hourly_rate * 0.25) # Extra 25% premium for the OT hours
-        total_pay = base_pay + ot_pay
+        # LOGIC: If they work less than 8h, result should be negative.
+        # We calculate the "Delta" from a standard 8-hour shift.
+        work_delta = total_hrs - 8 
+        
+        # OT Calculation (Only if Delta is positive AND person is OT eligible)
+        # They get paid their hourly rate for the 8 hours, 
+        # plus the extra hours at 1.25x.
+        
+        if work_delta > 0:
+            # Overtime logic
+            if ot_enabled.get(name) == "YES":
+                # First 8 hours at normal rate + extra hours at 1.25 rate
+                actual_pay = (8 * hourly_rate) + (work_delta * hourly_rate * 1.25)
+            else:
+                # No OT pay, just flat rate for all hours worked
+                actual_pay = total_hrs * hourly_rate
+        else:
+            # Undertime logic: They just get paid for the hours they actually worked
+            # which will be less than the "Standard 8h pay"
+            actual_pay = total_hrs * hourly_rate
+
+        # To show the "Negative" balance you requested:
+        # This shows how much they are 'down' or 'up' compared to a standard day's pay
+        standard_day_target = 8 * hourly_rate
+        net_vs_standard = actual_pay - standard_day_target
 
         summary.append({
             "Date": str(date), 
             "Name": name, 
             "Worked Hours": round(total_hrs, 2),
-            "OT Hours": round(ot_hrs, 2), 
-            "Undertime Hours": round(under_hrs, 2), 
             "Hourly Rate": hourly_rate,
-            "Base Pay": round(base_pay, 2),
-            "OT Premium": round(ot_pay, 2),
-            "Final Pay": round(total_pay, 2)
+            "Standard 8h Pay": round(standard_day_target, 2),
+            "Actual Earned": round(actual_pay, 2),
+            "Net Balance (Pay)": round(net_vs_standard, 2)
         })
     return pd.DataFrame(summary)
 
 # --- UI SETUP ---
 st.set_page_config(page_title="Malapascua DTR", layout="wide")
-st.title("Malapascua DTR & Payroll System")
+
+# Initialize Session State for the Name Dropdown
+if 'name_index' not in st.session_state:
+    st.session_state.name_index = 0
+
+def reset_name():
+    st.session_state.name_index = 0
+
+st.title("Malapascua DTR & Payroll")
 
 tab1, tab2 = st.tabs(["🕒 Staff Clock-In", "🔐 Admin Dashboard"])
 
@@ -89,81 +111,63 @@ with tab1:
     crew_df = load_crew()
     if crew_df is not None:
         staff_names = [""] + crew_df['Name'].tolist()
-        # The key helps Streamlit track state for the reset
-        selected_name = st.selectbox("Select your Name", staff_names, key="staff_select")
+        
+        # Use session state index to force the dropdown back to index 0
+        selected_name = st.selectbox(
+            "Select your Name", 
+            staff_names, 
+            index=st.session_state.name_index,
+            key="name_selector"
+        )
         
         if selected_name != "":
             now_manila = datetime.now(TIMEZONE)
             ts_str = now_manila.strftime("%Y-%m-%d %H:%M:%S")
-            time_display = now_manila.strftime("%H:%M:%S")
             
             col1, col2 = st.columns(2)
             ss = get_spreadsheet()
             main_sheet = ss.get_worksheet(0)
 
-            with col1:
-                if st.button("TIME IN", use_container_width=True, type="primary"):
-                    main_sheet.append_row([selected_name, ts_str, "IN", "Live"])
-                    st.success(f"✅ Time IN recorded at {time_display}")
-                    time.sleep(3) # Give them 3 seconds to read
-                    st.rerun()
+            if col1.button("TIME IN", use_container_width=True, type="primary"):
+                main_sheet.append_row([selected_name, ts_str, "IN", "Live"])
+                st.success(f"✅ Time IN: {ts_str}")
+                time.sleep(2)
+                st.session_state.name_index = 0 # Reset the index
+                st.rerun()
             
-            with col2:
-                if st.button("TIME OUT", use_container_width=True):
-                    main_sheet.append_row([selected_name, ts_str, "OUT", "Live"])
-                    
-                    raw_data = pd.DataFrame(main_sheet.get_all_records())
-                    user_today = raw_data[(raw_data['Name'] == selected_name)]
-                    user_today['Timestamp'] = pd.to_datetime(user_today['Timestamp'])
-                    user_today = user_today[user_today['Timestamp'].dt.date == now_manila.date()]
-                    
-                    ins = user_today[user_today['Status'] == 'IN']['Timestamp'].tolist()
-                    outs = user_today[user_today['Status'] == 'OUT']['Timestamp'].tolist()
-                    total_today = 0
-                    for i in range(min(len(ins), len(outs))):
-                        total_today += (outs[i] - ins[i]).total_seconds() / 3600
-                    
-                    st.warning(f"✅ Time OUT recorded at {time_display}")
-                    st.info(f"📊 Total worked today: {round(total_today, 2)} hours")
-                    time.sleep(5) # Give more time to see the hour summary
-                    st.rerun()
+            if col2.button("TIME OUT", use_container_width=True):
+                main_sheet.append_row([selected_name, ts_str, "OUT", "Live"])
+                st.warning(f"✅ Time OUT: {ts_str}")
+                time.sleep(4)
+                st.session_state.name_index = 0 # Reset the index
+                st.rerun()
 
 with tab2:
     if st.text_input("Enter Admin PIN", type="password") == ADMIN_PIN:
         st.success("Admin Access Granted")
         
-        st.subheader("📅 Report Filters")
-        col_start, col_end = st.columns(2)
-        with col_start:
-            d_start = st.date_input("From Date", datetime.now(TIMEZONE) - timedelta(days=7))
-        with col_end:
-            d_end = st.date_input("To Date", datetime.now(TIMEZONE))
+        d_start = st.date_input("From", datetime.now(TIMEZONE) - timedelta(days=7))
+        d_end = st.date_input("To", datetime.now(TIMEZONE))
 
         ss = get_spreadsheet()
         sheet_main = ss.get_worksheet(0)
         
         if sheet_main:
             raw_logs = pd.DataFrame(sheet_main.get_all_records())
-            
             if not raw_logs.empty:
                 payroll_report = calculate_payroll(raw_logs, crew_df, d_start, d_end)
-                st.subheader(f"💵 Payroll Report ({d_start} to {d_end})")
                 st.dataframe(payroll_report, use_container_width=True)
                 
-                if st.button("🔄 Sync Calculations to 'Payroll_Summary' Tab"):
+                if st.button("🔄 Sync to 'Payroll_Summary'"):
                     try:
                         try:
                             sheet_summary = ss.worksheet("Payroll_Summary")
-                        except gspread.exceptions.WorksheetNotFound:
+                        except:
                             sheet_summary = ss.add_worksheet(title="Payroll_Summary", rows="100", cols="20")
                         
                         sheet_summary.clear()
-                        # Convert all to string to prevent sync errors
-                        data_to_push = [payroll_report.columns.values.tolist()] + payroll_report.astype(str).values.tolist()
-                        sheet_summary.update(data_to_push)
-                        st.success("Successfully synced to Google Sheets!")
-                    except Exception as sync_err:
-                        st.error(f"Sync failed: {sync_err}")
-                
-                csv = payroll_report.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Download CSV Report", csv, f"Payroll_{d_start}_{d_end}.csv", "text/csv")
+                        data = [payroll_report.columns.tolist()] + payroll_report.astype(str).values.tolist()
+                        sheet_summary.update(data)
+                        st.success("Synced!")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
