@@ -45,7 +45,7 @@ try:
 
         # --- UI SETUP ---
         st.set_page_config(page_title="Malapascua DTR", layout="wide")
-        st.title("Sipadan Borneo DTR") # Use your preferred name here
+        st.title("Malapascua DTR") # Use your preferred name here
 
         tab1, tab2 = st.tabs(["🕒 Staff Clock-In", "🔐 Admin Dashboard"])
 
