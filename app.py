@@ -3,13 +3,13 @@ import pandas as pd
 from datetime import datetime
 import os
 
-# --- APP CONFIG ---
+# --- APP CONFIG & HEADER ---
 st.set_page_config(page_title="Malapascua DTR")
 st.title("Malapascua - Daily Time Record")
 
 FILE_PATH = "dtr_log.csv"
 ADMIN_PIN = "1234" 
-STANDARD_HOURS = 8.0 # Based on your standard shift requirements
+STANDARD_HOURS = 8.0 
 
 # --- DATA LOADING ---
 if os.path.exists(FILE_PATH):
@@ -28,23 +28,23 @@ staff_names = [
     "MORANO, REX", "MORENO, DAVID", "MORENO, JANINE", "PASCOBELLO, MARK MARTIN",
     "PEPITO, ALEXANDER", "PILAPIL, NOVEAIME", "ROSALES, JAMAICA", "ROSALES, JOHN",
     "ROSALES, LYDIO JR", "RUBIO, MELVIN", "SABALBORO, JAYVEE", "SUAN, CLARK", "UY, DANNY", "YANGAN, JESSIE"
-][cite: 1, 10]
+]
 
 # --- CALCULATION LOGIC ---
 def calculate_metrics(row):
-    if row['Status'] == 'Completed' and pd.notnull(row['Time Out']):
+    if row['Status'] == 'Completed' and pd.notnull(row['Time Out']) and row['Time Out'] != "":
         try:
             fmt = "%H:%M:%S"
             t_in = datetime.strptime(row['Time In'], fmt)
             t_out = datetime.strptime(row['Time Out'], fmt)
             duration = (t_out - t_in).total_seconds() / 3600
             
-            ot = max(0, duration - STANDARD_HOURS)
-            ut = max(0, STANDARD_HOURS - duration)
+            ot = max(0.0, duration - STANDARD_HOURS)
+            ut = max(0.0, STANDARD_HOURS - duration)
             return round(duration, 2), round(ot, 2), round(ut, 2)
         except:
-            return 0, 0, 0
-    return 0, 0, 0
+            return 0.0, 0.0, 0.0
+    return 0.0, 0.0, 0.0
 
 # --- TABS ---
 tab1, tab2 = st.tabs(["🕒 Attendance", "⚙️ Admin (Payroll & Edits)"])
@@ -69,13 +69,15 @@ with tab1:
                 df.at[idx[-1], 'Status'] = 'Completed'
                 df.to_csv(FILE_PATH, index=False)
                 st.error(f"{selected_name} Timed Out.")
+            else:
+                st.warning("No active 'Time In' record found.")
 
 with tab2:
     pin_input = st.text_input("Enter Admin PIN", type="password")
     if pin_input == ADMIN_PIN:
         st.subheader("Payroll Review & Record Management")
         
-        # Apply calculations for display
+        # Display logic with calculations
         display_df = df.copy()
         if not display_df.empty:
             metrics = display_df.apply(calculate_metrics, axis=1, result_type='expand')
@@ -83,13 +85,14 @@ with tab2:
             display_df['Overtime'] = metrics[1]
             display_df['Undertime'] = metrics[2]
 
-        # Admin Editor (Now with visible OT/UT columns)
+        # Use data_editor for easy editing/deleting
         edited_df = st.data_editor(display_df, num_rows="dynamic", key="payroll_editor")
         
         if st.button("Save Changes"):
-            # We only save the core columns back to the CSV to keep it clean
             save_cols = ["Name", "Date", "Time In", "Time Out", "Status"]
-            edited_df[save_cols].to_csv(FILE_PATH, index=False)
-            st.success("Payroll records and edits saved.")
+            # Filter back to original columns for storage
+            final_df = edited_df[save_cols]
+            final_df.to_csv(FILE_PATH, index=False)
+            st.success("Changes saved successfully.")
     elif pin_input != "":
-        st.error("Access Denied.")
+        st.error("Incorrect PIN.")
