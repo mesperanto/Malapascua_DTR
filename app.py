@@ -17,7 +17,7 @@ TIMEZONE = pytz.timezone('Asia/Manila')
 def load_crew():
     if not os.path.exists("Crew details.xlsx"):
         return None
-    # Skips the first row as per the Excel structure found in your files
+    # Skips the first row based on your Excel structure
     df = pd.read_excel("Crew details.xlsx", skiprows=1)
     df.columns = ['Name', 'Job', 'Hired', 'Pay_OT', 'Pay_Night', 'Rate']
     return df
@@ -32,11 +32,10 @@ def get_spreadsheet():
         st.error(f"Spreadsheet Access Error: {e}")
         return None
 
-# --- PAYROLL CALCULATOR ENGINE ---
+# --- PAYROLL ENGINE (Hourly Rate Logic) ---
 def calculate_payroll(df_logs, df_crew, start_date=None, end_date=None):
     df_logs['Timestamp'] = pd.to_datetime(df_logs['Timestamp'])
     df_logs['Date'] = df_logs['Timestamp'].dt.date
-    
     if start_date and end_date:
         df_logs = df_logs[(df_logs['Date'] >= start_date) & (df_logs['Date'] <= end_date)]
     
@@ -53,111 +52,90 @@ def calculate_payroll(df_logs, df_crew, start_date=None, end_date=None):
         for i in range(min(len(ins), len(outs))):
             total_hrs += (outs[i] - ins[i]).total_seconds() / 3600
         
-        hourly_rate = rates.get(name, 0)
-        work_delta = total_hrs - 8 
-        
-        if work_delta > 0 and ot_enabled.get(name) == "YES":
-            actual_pay = (8 * hourly_rate) + (work_delta * hourly_rate * 1.25)
-        else:
-            actual_pay = total_hrs * hourly_rate
-
-        standard_day_target = 8 * hourly_rate
-        net_vs_standard = actual_pay - standard_day_target
-
+        h_rate = rates.get(name, 0)
+        # Final pay calculation: Hours worked * Rate
+        # Includes a net balance vs an 8-hour shift
+        actual_pay = total_hrs * h_rate
+        if total_hrs > 8 and ot_enabled.get(name) == "YES":
+            actual_pay += (total_hrs - 8) * h_rate * 0.25 # 25% OT Premium
+            
         summary.append({
-            "Date": str(date), 
-            "Name": name, 
-            "Worked Hours": round(total_hrs, 2),
-            "Hourly Rate": hourly_rate,
-            "Standard 8h Pay": round(standard_day_target, 2),
-            "Actual Earned": round(actual_pay, 2),
-            "Net Balance (Pay)": round(net_vs_standard, 2)
+            "Date": str(date), "Name": name, "Worked Hours": round(total_hrs, 2),
+            "Hourly Rate": h_rate, "Final Pay": round(actual_pay, 2),
+            "Net vs 8h": round(actual_pay - (8 * h_rate), 2)
         })
     return pd.DataFrame(summary)
 
 # --- UI SETUP ---
-st.set_page_config(page_title="Malapascua DTR", layout="wide")
+st.set_page_config(page_title="Malapascua DTR", layout="centered")
 
-# Initialize session state for UI reset
-if 'show_conf' not in st.session_state:
-    st.session_state.show_conf = False
-if 'conf_msg' not in st.session_state:
-    st.session_state.conf_msg = ""
-
-st.title("Malapascua DTR & Payroll System")
+# Initialize a 'submitted' state to handle the 5-second screen
+if 'submitted' not in st.session_state:
+    st.session_state.submitted = False
+if 'msg' not in st.session_state:
+    st.session_state.msg = ""
 
 tab1, tab2 = st.tabs(["🕒 Staff Clock-In", "🔐 Admin Dashboard"])
 
 with tab1:
-    # If a confirmation is showing, display it and wait
-    if st.session_state.show_conf:
-        st.success(st.session_state.conf_msg)
-        progress_bar = st.progress(0)
-        for i in range(100):
-            time.sleep(0.05) # Total 5 seconds
-            progress_bar.progress(i + 1)
-        
-        # Reset and reload
-        st.session_state.show_conf = False
-        st.session_state.conf_msg = ""
-        st.rerun()
+    placeholder = st.empty() # This container allows us to wipe the screen
+    
+    if st.session_state.submitted:
+        # 1. Display ONLY hh:mm for 5 seconds
+        with placeholder.container():
+            st.markdown(f"<h1 style='text-align: center; color: green;'>{st.session_state.msg}</h1>", unsafe_allow_html=True)
+            time.sleep(5)
+            # 2. Clear state and reset
+            st.session_state.submitted = False
+            st.session_state.msg = ""
+            st.rerun()
+    else:
+        # Normal Clock-in UI
+        with placeholder.container():
+            crew_df = load_crew()
+            if crew_df is not None:
+                staff_names = [""] + sorted(crew_df['Name'].tolist())
+                # Using a key that we can clear
+                selected_name = st.selectbox("Select your Name", staff_names, key="name_selector")
+                
+                if selected_name:
+                    now = datetime.now(TIMEZONE)
+                    display_time = now.strftime("%H:%M") # hh:mm format
+                    db_ts = now.strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    col1, col2 = st.columns(2)
+                    ss = get_spreadsheet()
+                    main_sheet = ss.get_worksheet(0)
 
-    crew_df = load_crew()
-    if crew_df is not None:
-        staff_names = [""] + crew_df['Name'].tolist()
-        
-        # Name selector - resetting occurs via the st.rerun() logic above
-        selected_name = st.selectbox("Select your Name", staff_names, key="staff_select_box")
-        
-        if selected_name != "":
-            now_manila = datetime.now(TIMEZONE)
-            # Full timestamp for database
-            db_ts = now_manila.strftime("%Y-%m-%d %H:%M:%S")
-            # Simplified display for staff
-            display_time = now_manila.strftime("%H:%M")
-            
-            col1, col2 = st.columns(2)
-            ss = get_spreadsheet()
-            main_sheet = ss.get_worksheet(0)
+                    if col1.button("TIME IN", use_container_width=True, type="primary"):
+                        main_sheet.append_row([selected_name, db_ts, "IN", "Live"])
+                        st.session_state.msg = f"Time IN: {display_time}"
+                        st.session_state.submitted = True
+                        st.rerun()
 
-            if col1.button("TIME IN", use_container_width=True, type="primary"):
-                main_sheet.append_row([selected_name, db_ts, "IN", "Live"])
-                st.session_state.conf_msg = f"✅ {selected_name} - Time IN at {display_time}"
-                st.session_state.show_conf = True
-                st.rerun()
-            
-            if col2.button("TIME OUT", use_container_width=True):
-                main_sheet.append_row([selected_name, db_ts, "OUT", "Live"])
-                st.session_state.conf_msg = f"✅ {selected_name} - Time OUT at {display_time}"
-                st.session_state.show_conf = True
-                st.rerun()
+                    if col2.button("TIME OUT", use_container_width=True):
+                        main_sheet.append_row([selected_name, db_ts, "OUT", "Live"])
+                        st.session_state.msg = f"Time OUT: {display_time}"
+                        st.session_state.submitted = True
+                        st.rerun()
 
 with tab2:
-    if st.text_input("Enter Admin PIN", type="password") == ADMIN_PIN:
-        st.success("Admin Access Granted")
-        
+    if st.text_input("Admin PIN", type="password") == ADMIN_PIN:
+        st.success("Access Granted")
         d_start = st.date_input("From", datetime.now(TIMEZONE) - timedelta(days=7))
         d_end = st.date_input("To", datetime.now(TIMEZONE))
-
-        ss = get_spreadsheet()
-        sheet_main = ss.get_worksheet(0)
         
-        if sheet_main:
-            raw_logs = pd.DataFrame(sheet_main.get_all_records())
-            if not raw_logs.empty:
-                payroll_report = calculate_payroll(raw_logs, crew_df, d_start, d_end)
-                st.dataframe(payroll_report, use_container_width=True)
-                
-                if st.button("🔄 Sync to 'Payroll_Summary'"):
-                    try:
-                        try:
-                            sheet_summary = ss.worksheet("Payroll_Summary")
-                        except:
-                            sheet_summary = ss.add_worksheet(title="Payroll_Summary", rows="100", cols="20")
-                        
-                        sheet_summary.clear()
-                        data = [payroll_report.columns.tolist()] + payroll_report.astype(str).values.tolist()
-                        sheet_summary.update(data)
-                        st.success("Synced to Google Sheets!")
-                    except Exception as e:
-                        st.error(f"Sync failed: {e}")
+        ss = get_spreadsheet()
+        raw_logs = pd.DataFrame(ss.get_worksheet(0).get_all_records())
+        if not raw_logs.empty:
+            report = calculate_payroll(raw_logs, load_crew(), d_start, d_end)
+            st.dataframe(report, use_container_width=True)
+            
+            if st.button("🔄 Sync to 'Payroll_Summary'"):
+                try:
+                    try: sheet_summary = ss.worksheet("Payroll_Summary")
+                    except: sheet_summary = ss.add_worksheet(title="Payroll_Summary", rows="100", cols="20")
+                    sheet_summary.clear()
+                    sheet_summary.update([report.columns.tolist()] + report.astype(str).values.tolist())
+                    st.success("Synced!")
+                except Exception as e: st.error(f"Error: {e}")
