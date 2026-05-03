@@ -17,6 +17,7 @@ TIMEZONE = pytz.timezone('Asia/Manila')
 def load_crew():
     if not os.path.exists("Crew details.xlsx"):
         return None
+    # Skips the first row as per the Excel structure found in your files
     df = pd.read_excel("Crew details.xlsx", skiprows=1)
     df.columns = ['Name', 'Job', 'Hired', 'Pay_OT', 'Pay_Night', 'Rate']
     return df
@@ -28,7 +29,7 @@ def get_spreadsheet():
         client = gspread.authorize(creds)
         return client.open(SHEET_NAME)
     except Exception as e:
-        st.error(f"Spreadsheet Error: {e}")
+        st.error(f"Spreadsheet Access Error: {e}")
         return None
 
 # --- PAYROLL CALCULATOR ENGINE ---
@@ -52,33 +53,14 @@ def calculate_payroll(df_logs, df_crew, start_date=None, end_date=None):
         for i in range(min(len(ins), len(outs))):
             total_hrs += (outs[i] - ins[i]).total_seconds() / 3600
         
-        sessions = len(ins)
-        threshold = 8 if sessions >= 2 else 9
         hourly_rate = rates.get(name, 0)
-        
-        # LOGIC: If they work less than 8h, result should be negative.
-        # We calculate the "Delta" from a standard 8-hour shift.
         work_delta = total_hrs - 8 
         
-        # OT Calculation (Only if Delta is positive AND person is OT eligible)
-        # They get paid their hourly rate for the 8 hours, 
-        # plus the extra hours at 1.25x.
-        
-        if work_delta > 0:
-            # Overtime logic
-            if ot_enabled.get(name) == "YES":
-                # First 8 hours at normal rate + extra hours at 1.25 rate
-                actual_pay = (8 * hourly_rate) + (work_delta * hourly_rate * 1.25)
-            else:
-                # No OT pay, just flat rate for all hours worked
-                actual_pay = total_hrs * hourly_rate
+        if work_delta > 0 and ot_enabled.get(name) == "YES":
+            actual_pay = (8 * hourly_rate) + (work_delta * hourly_rate * 1.25)
         else:
-            # Undertime logic: They just get paid for the hours they actually worked
-            # which will be less than the "Standard 8h pay"
             actual_pay = total_hrs * hourly_rate
 
-        # To show the "Negative" balance you requested:
-        # This shows how much they are 'down' or 'up' compared to a standard day's pay
         standard_day_target = 8 * hourly_rate
         net_vs_standard = actual_pay - standard_day_target
 
@@ -96,50 +78,58 @@ def calculate_payroll(df_logs, df_crew, start_date=None, end_date=None):
 # --- UI SETUP ---
 st.set_page_config(page_title="Malapascua DTR", layout="wide")
 
-# Initialize Session State for the Name Dropdown
-if 'name_index' not in st.session_state:
-    st.session_state.name_index = 0
+# Initialize session state for UI reset
+if 'show_conf' not in st.session_state:
+    st.session_state.show_conf = False
+if 'conf_msg' not in st.session_state:
+    st.session_state.conf_msg = ""
 
-def reset_name():
-    st.session_state.name_index = 0
-
-st.title("Malapascua DTR & Payroll")
+st.title("Malapascua DTR & Payroll System")
 
 tab1, tab2 = st.tabs(["🕒 Staff Clock-In", "🔐 Admin Dashboard"])
 
 with tab1:
+    # If a confirmation is showing, display it and wait
+    if st.session_state.show_conf:
+        st.success(st.session_state.conf_msg)
+        progress_bar = st.progress(0)
+        for i in range(100):
+            time.sleep(0.05) # Total 5 seconds
+            progress_bar.progress(i + 1)
+        
+        # Reset and reload
+        st.session_state.show_conf = False
+        st.session_state.conf_msg = ""
+        st.rerun()
+
     crew_df = load_crew()
     if crew_df is not None:
         staff_names = [""] + crew_df['Name'].tolist()
         
-        # Use session state index to force the dropdown back to index 0
-        selected_name = st.selectbox(
-            "Select your Name", 
-            staff_names, 
-            index=st.session_state.name_index,
-            key="name_selector"
-        )
+        # Name selector - resetting occurs via the st.rerun() logic above
+        selected_name = st.selectbox("Select your Name", staff_names, key="staff_select_box")
         
         if selected_name != "":
             now_manila = datetime.now(TIMEZONE)
-            ts_str = now_manila.strftime("%Y-%m-%d %H:%M:%S")
+            # Full timestamp for database
+            db_ts = now_manila.strftime("%Y-%m-%d %H:%M:%S")
+            # Simplified display for staff
+            display_time = now_manila.strftime("%H:%M")
             
             col1, col2 = st.columns(2)
             ss = get_spreadsheet()
             main_sheet = ss.get_worksheet(0)
 
             if col1.button("TIME IN", use_container_width=True, type="primary"):
-                main_sheet.append_row([selected_name, ts_str, "IN", "Live"])
-                st.success(f"✅ Time IN: {ts_str}")
-                time.sleep(2)
-                st.session_state.name_index = 0 # Reset the index
+                main_sheet.append_row([selected_name, db_ts, "IN", "Live"])
+                st.session_state.conf_msg = f"✅ {selected_name} - Time IN at {display_time}"
+                st.session_state.show_conf = True
                 st.rerun()
             
             if col2.button("TIME OUT", use_container_width=True):
-                main_sheet.append_row([selected_name, ts_str, "OUT", "Live"])
-                st.warning(f"✅ Time OUT: {ts_str}")
-                time.sleep(4)
-                st.session_state.name_index = 0 # Reset the index
+                main_sheet.append_row([selected_name, db_ts, "OUT", "Live"])
+                st.session_state.conf_msg = f"✅ {selected_name} - Time OUT at {display_time}"
+                st.session_state.show_conf = True
                 st.rerun()
 
 with tab2:
@@ -168,6 +158,6 @@ with tab2:
                         sheet_summary.clear()
                         data = [payroll_report.columns.tolist()] + payroll_report.astype(str).values.tolist()
                         sheet_summary.update(data)
-                        st.success("Synced!")
+                        st.success("Synced to Google Sheets!")
                     except Exception as e:
-                        st.error(f"Error: {e}")
+                        st.error(f"Sync failed: {e}")
